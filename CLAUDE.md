@@ -34,4 +34,15 @@ open build/Build/Products/Release/LaunchdBar.app
 - Read-only prema sistemu osim eksplicitnih akcija (kickstart). Ništa destruktivno.
 
 ## Status
-Vidi `HANDOFF.md` za potpunu spec i što je ostalo za napraviti.
+**GOTOVO (2026-06-22)** — app je funkcionalan i build-a clean (`./build.sh` → BUILD SUCCEEDED).
+Implementirano svih 5 Swift fajlova:
+- `Sources/Models.swift` — `LaunchdJob`, `describeSchedule(_:)`, `LaunchdLoader.loadAll()` (merge `launchctl list` + plistovi iz 3 dira).
+- `Sources/JobStore.swift` — `@MainActor ObservableObject`, auto-refresh 8 s, `runNow/reveal/openLog`.
+- `Sources/LaunchdBarApp.swift` — `MenuBarExtra` (`timer` ikona, `.window` stil).
+- `Sources/MenuContentView.swift` — header (Only mine toggle, refresh, updated time), scrollable lista s `JobRow` (status dot + hover akcijski gumbi + context menu), footer (broj + Quit).
+- `build.sh` — xcodegen + xcodebuild Release.
+
+Provjereno: lista prikazuje korisnikove jobove (domovina/italk/stepanic/…), schedule parsing radi
+(npr. `com.stepanic.dotclaude-backup` → `at 03:30`). "Only mine" default ON, mine jobovi prvi.
+
+Preostale ideje (opcionalno) vidi u `HANDOFF.md`.

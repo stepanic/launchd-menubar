@@ -1,5 +1,9 @@
 # HANDOFF — dovrši LaunchdBar (macOS menu-bar launchd viewer)
 
+> ✅ **DOVRŠENO 2026-06-22.** Svi Swift fajlovi (Models/JobStore/App/View), `build.sh` napravljeni,
+> app build-a clean (BUILD SUCCEEDED) i pokreće se u menu baru. Vidi "Status" u `CLAUDE.md`.
+> Prompt ispod ostaje kao referenca spec-a.
+
 > Pokreni `claude` iz `/Users/ms/git/stepanic/launchd-menubar` i zalijepi prompt ispod
 > (sve od "PROMPT START" do "PROMPT END"). Pročitaj prvo `CLAUDE.md` u repou — ima okruženje i konvencije.
 
