@@ -57,8 +57,42 @@ final class JobStore: ObservableObject {
     }
 
     func openLog(_ job: LaunchdJob) {
-        let candidate = job.stdoutPath ?? job.stderrPath
-        guard let path = candidate, FileManager.default.fileExists(atPath: path) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        guard let url = JobStore.bestLogURL(for: job) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Pick the most useful log to open.
+    ///
+    /// The plist's `StandardOutPath`/`StandardErrorPath` are often stale because the
+    /// job's script redirects its own output to a dated file (e.g. `nightly_2026-06-27.log`)
+    /// in the same directory. So we consider both the declared paths *and* the newest
+    /// `*.log` sitting next to them, and open whichever was modified most recently.
+    static func bestLogURL(for job: LaunchdJob) -> URL? {
+        let fm = FileManager.default
+        var candidates: Set<String> = []
+
+        for path in [job.stdoutPath, job.stderrPath].compactMap({ $0 }) {
+            if fm.fileExists(atPath: path) { candidates.insert(path) }
+            let dir = (path as NSString).deletingLastPathComponent
+            if let newest = newestLog(in: dir, fm: fm) { candidates.insert(newest) }
+        }
+
+        return candidates
+            .map { URL(fileURLWithPath: $0) }
+            .max { modDate($0, fm) < modDate($1, fm) }
+    }
+
+    /// Most recently modified `*.log` file directly inside `dir`, if any.
+    private static func newestLog(in dir: String, fm: FileManager) -> String? {
+        guard !dir.isEmpty,
+              let entries = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+        return entries
+            .filter { $0.hasSuffix(".log") }
+            .map { "\(dir)/\($0)" }
+            .max { modDate(URL(fileURLWithPath: $0), fm) < modDate(URL(fileURLWithPath: $1), fm) }
+    }
+
+    private static func modDate(_ url: URL, _ fm: FileManager) -> Date {
+        (try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
     }
 }

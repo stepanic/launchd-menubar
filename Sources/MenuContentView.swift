@@ -57,7 +57,7 @@ struct MenuContentView: View {
                 }
             }
         }
-        .frame(maxHeight: 420)
+        .frame(minHeight: 360, maxHeight: 480)
     }
 
     // MARK: - Footer
