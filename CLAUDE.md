@@ -24,8 +24,16 @@ com.stepanic.dotclaude-backup, com.domovina.ecosystem-brain.daily.
 ## Build / run
 ```bash
 ./build.sh            # xcodegen generate + xcodebuild Release + ispiše putanju .app
+./build.sh install    # + deploy u /Applications/LaunchdBar.app i kickstart launchd joba
 open build/Build/Products/Release/LaunchdBar.app
 ```
+
+**VAŽNO:** autostart (`~/Library/LaunchAgents/com.stepanic.LaunchdBar.plist`, label
+`com.stepanic.LaunchdBar`) pokreće `/Applications/LaunchdBar.app`. Obični `./build.sh`
+samo builda u repo `build/` — nakon reboota launchd digne staru `/Applications` kopiju.
+Zato za trajni deploy uvijek koristi `./build.sh install` (prepiše `/Applications`,
+re-registrira u LaunchServices da izbjegne `OS_REASON_CODESIGNING` na prvom spawnu,
+pa kickstarta job).
 
 ## Konvencije
 - Swift language mode 5.0 (postavljeno u project.yml) — izbjegava strict concurrency gnjavažu.
