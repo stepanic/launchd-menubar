@@ -18,6 +18,9 @@ if [ "$1" = "install" ]; then
   sleep 1
   rm -rf "$DST"
   cp -R "$APP" "$DST"
+  # Re-sign ad-hoc after the copy: the kernel caches signatures per inode, so the
+  # fresh copy at the old path spawns with OS_REASON_CODESIGNING without this.
+  codesign --force --deep -s - "$DST"
   # Register with LaunchServices so the first launchd spawn doesn't hit a
   # stale code-signature cache (OS_REASON_CODESIGNING).
   /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "$DST"
