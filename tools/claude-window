@@ -1,0 +1,298 @@
+#!/usr/bin/env node
+"use strict";
+
+/**
+ * claude-window — dijeljeni arbitar za pozadinske jobove koji zovu `claude`.
+ *
+ * Problem (vidi SCHEDULING.md): Claude Code pretplata broji kvotu u ~5h prozoru.
+ * Job koji zove `claude` u 05:20 otvara nov prozor koji je živ u 08:30, pa jutro
+ * počne s potrošenom kvotom. Fiksno vrijeme cutoffa po jobu ne radi:
+ *
+ *   - 02:30 je prekonzervativno — ako je prozor otvoren u 00:10, pozivi do ~05:10
+ *     su unutar njega i ne koštaju ništa dodatno.
+ *   - 05:30 je nesigurno — ako je taj prozor u međuvremenu istekao, poziv u 05:20
+ *     otvara NOVI koji traje do ~10:20.
+ *
+ * Razlika je u tome ulazi li poziv u već otvoren prozor ili otvara novi. To se ne
+ * može znati iz sata, pa ovaj alat drži stanje na jednom mjestu i svi jobovi ga
+ * pitaju prije poziva.
+ *
+ * Uz to čita `quotaLimits` zapise koje Claude Code CLI ostavlja u session logovima
+ * kad request bude odbijen. Ti zapisi nose `resetsAt` i `rateLimitType`, pa alat
+ * zna i kad smo stvarno na zidu — 18.-21.8.2026. je tjedni limit bio pun četiri
+ * dana, a toptal-jobwatch je retryao u odbijenicu svakih ~3 min cijeli sat.
+ *
+ * Korištenje:
+ *   claude-window check            exit 0 = smiješ zvati, exit 10 = odgodi
+ *   claude-window check --json     isto, + JSON obrazloženje na stdout
+ *   claude-window status           stanje bez donošenja odluke
+ *   claude-window reset            obriši zapamćen prozor (za testiranje)
+ *
+ * `check` s exit 0 ujedno ZAPISUJE da je prozor otvoren sada, ako već nije bio —
+ * zato ga zovi neposredno prije stvarnog poziva, ne unaprijed za cijeli batch.
+ *
+ * Env:
+ *   CLAUDE_WINDOW_PROTECT_AT   HH:MM koje mora biti čisto (default 08:30)
+ *   CLAUDE_WINDOW_HOURS        trajanje prozora u satima (default 5)
+ *   CLAUDE_WINDOW_MARGIN_MIN   sigurnosna margina u minutama (default 10)
+ *   CLAUDE_WINDOW_DISABLE=1    arbitar uvijek dopušta (escape hatch)
+ *   CLAUDE_WINDOW_STATE        putanja do state fajla
+ *   CLAUDE_WINDOW_NOW          ISO vrijeme umjesto sata — samo za testove
+ */
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const HOUR_MS = 3600 * 1000;
+const MIN_MS = 60 * 1000;
+
+const STATE_PATH = process.env.CLAUDE_WINDOW_STATE
+    || path.join(os.homedir(), ".local", "state", "claude-window", "state.json");
+const PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
+
+const PROTECT_AT = process.env.CLAUDE_WINDOW_PROTECT_AT || "08:30";
+const WINDOW_MS = Number(process.env.CLAUDE_WINDOW_HOURS || 5) * HOUR_MS;
+const MARGIN_MS = Number(process.env.CLAUDE_WINDOW_MARGIN_MIN || 10) * MIN_MS;
+
+// Session logovi se skeniraju najviše jednom u ovom intervalu — `check` se zove
+// jednom po epizodi, a scan čita tailove više fajlova.
+const OBSERVE_TTL_MS = 60 * 1000;
+const OBSERVE_FILES = 10;
+const OBSERVE_TAIL_BYTES = 512 * 1024;
+
+// ─── state ────────────────────────────────────────────────────────────────
+
+function loadState() {
+    try {
+        return JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
+    } catch (_) {
+        return {};
+    }
+}
+
+function saveState(state) {
+    fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
+    const tmp = STATE_PATH + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+    fs.renameSync(tmp, STATE_PATH);   // atomic: više jobova može zvati istovremeno
+}
+
+// ─── observed limits, iz Claude Code session logova ───────────────────────
+
+/** Zadnjih `bytes` bajtova fajla kao string (bez učitavanja cijelog loga). */
+function tail(file, bytes) {
+    let fd;
+    try {
+        fd = fs.openSync(file, "r");
+        const size = fs.fstatSync(fd).size;
+        const start = Math.max(0, size - bytes);
+        const buf = Buffer.alloc(size - start);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        return buf.toString("utf-8");
+    } catch (_) {
+        return "";
+    } finally {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch (_) { /* ignore */ } }
+    }
+}
+
+function recentSessionFiles(limit) {
+    let dirs;
+    try {
+        dirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => path.join(PROJECTS_DIR, d.name));
+    } catch (_) {
+        return [];
+    }
+    const files = [];
+    for (const dir of dirs) {
+        let entries;
+        try { entries = fs.readdirSync(dir); } catch (_) { continue; }
+        for (const name of entries) {
+            if (!name.endsWith(".jsonl")) continue;
+            const full = path.join(dir, name);
+            try { files.push({ full, mtime: fs.statSync(full).mtimeMs }); } catch (_) { /* ignore */ }
+        }
+    }
+    files.sort((a, b) => b.mtime - a.mtime);
+    return files.slice(0, limit).map((f) => f.full);
+}
+
+/**
+ * Najnoviji `quotaLimits` zapis po tipu limita iz nedavnih session logova.
+ * CLI ih piše samo kad request bude ODBIJEN, pa je nalaz uvijek "udarili smo u zid",
+ * nikad "ovoliko nam je ostalo".
+ */
+function scanObservedLimits() {
+    const out = {};
+    for (const file of recentSessionFiles(OBSERVE_FILES)) {
+        const text = tail(file, OBSERVE_TAIL_BYTES);
+        for (const line of text.split("\n")) {
+            if (!line.includes('"quotaLimits"')) continue;
+            let rec;
+            try { rec = JSON.parse(line); } catch (_) { continue; }
+            const q = rec && rec.quotaLimits;
+            if (!q || !q.rateLimitType || !q.resetsAt) continue;
+            const seenAt = rec.timestamp ? Date.parse(rec.timestamp) : 0;
+            const prev = out[q.rateLimitType];
+            if (!prev || seenAt > prev.seenAt) {
+                out[q.rateLimitType] = { resetsAt: q.resetsAt * 1000, seenAt, status: q.status };
+            }
+        }
+    }
+    return out;
+}
+
+function refreshObserved(state, now) {
+    const known = state.observed || {};
+    if (state.observedAt && now - state.observedAt < OBSERVE_TTL_MS) return known;
+
+    // Scan nadopunjuje, ne zamjenjuje: `resetsAt` u budućnosti vrijedi i kad ga
+    // scan više ne nađe (log se rotirao, ili je zapis ispao iz tail prozora).
+    // Bez ovoga bi jedan promašen scan poništio znanje da smo na tjednom limitu.
+    const merged = {};
+    for (const [type, hit] of Object.entries(known)) {
+        if (hit && hit.resetsAt > now) merged[type] = hit;
+    }
+    for (const [type, hit] of Object.entries(scanObservedLimits())) {
+        const prev = merged[type];
+        if (!prev || hit.seenAt >= prev.seenAt) merged[type] = hit;
+    }
+
+    state.observed = merged;
+    state.observedAt = now;
+    return merged;
+}
+
+// ─── odluka ───────────────────────────────────────────────────────────────
+
+/** Prva pojava HH:MM strogo nakon `now`. */
+function nextOccurrence(now, hhmm) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
+    if (!m) throw new Error(`neispravan CLAUDE_WINDOW_PROTECT_AT: ${hhmm}`);
+    const d = new Date(now);
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+    return d.getTime();
+}
+
+function decide(state, now) {
+    if (process.env.CLAUDE_WINDOW_DISABLE === "1") {
+        return { allow: true, reason: "arbitar isključen (CLAUDE_WINDOW_DISABLE=1)" };
+    }
+
+    const observed = refreshObserved(state, now);
+    const deadline = nextOccurrence(now, PROTECT_AT) - MARGIN_MS;
+
+    // 1) Tvrdi limiti: znamo da smo odbijeni i reset još nije prošao. Poziv bi
+    //    ionako pao, pa nema smisla ni pokušavati (ovo je i backoff, ne samo ograda).
+    for (const type of ["seven_day", "five_hour"]) {
+        const hit = observed[type];
+        if (hit && hit.resetsAt > now) {
+            return {
+                allow: false,
+                reason: `${type} limit iscrpljen, reset ${fmt(hit.resetsAt)}`,
+                resetsAt: hit.resetsAt,
+            };
+        }
+    }
+
+    // 2) Jesmo li unutar prozora koji smo sami otvorili?
+    const start = state.windowStart;
+    if (start && now < start + WINDOW_MS) {
+        const end = start + WINDOW_MS;
+        if (end <= deadline) {
+            return { allow: true, reason: `unutar prozora otvorenog ${fmt(start)}, istječe ${fmt(end)}`, windowEnd: end };
+        }
+        return {
+            allow: false,
+            reason: `prozor otvoren ${fmt(start)} traje do ${fmt(end)}, preko ${PROTECT_AT}`,
+            windowEnd: end,
+        };
+    }
+
+    // 3) Nema otvorenog prozora → ovaj poziv otvara novi.
+    const newEnd = now + WINDOW_MS;
+    if (newEnd <= deadline) {
+        return { allow: true, reason: `otvaram nov prozor, istječe ${fmt(newEnd)}`, opensWindow: true, windowEnd: newEnd };
+    }
+    return {
+        allow: false,
+        reason: `nov prozor bi trajao do ${fmt(newEnd)}, preko ${PROTECT_AT}`,
+        windowEnd: newEnd,
+    };
+}
+
+function fmt(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// ─── CLI ──────────────────────────────────────────────────────────────────
+
+function main() {
+    const args = process.argv.slice(2);
+    const cmd = args.find((a) => !a.startsWith("-")) || "check";
+    const asJson = args.includes("--json");
+    const now = process.env.CLAUDE_WINDOW_NOW ? Date.parse(process.env.CLAUDE_WINDOW_NOW) : Date.now();
+    const state = loadState();
+
+    if (cmd === "reset") {
+        saveState({});
+        console.log("state obrisan");
+        return 0;
+    }
+
+    if (cmd === "status") {
+        const observed = refreshObserved(state, now);
+        saveState(state);
+        const info = {
+            now: fmt(now),
+            protectAt: PROTECT_AT,
+            windowHours: WINDOW_MS / HOUR_MS,
+            marginMin: MARGIN_MS / MIN_MS,
+            windowStart: state.windowStart ? fmt(state.windowStart) : null,
+            windowEnd: state.windowStart ? fmt(state.windowStart + WINDOW_MS) : null,
+            observed: Object.fromEntries(
+                Object.entries(observed).map(([k, v]) => [k, { resetsAt: fmt(v.resetsAt), seenAt: fmt(v.seenAt) }])
+            ),
+            decision: decide({ ...state }, now),
+        };
+        console.log(asJson ? JSON.stringify(info, null, 2) : renderStatus(info));
+        return 0;
+    }
+
+    if (cmd !== "check") {
+        console.error(`nepoznata naredba: ${cmd} (check | status | reset)`);
+        return 2;
+    }
+
+    const verdict = decide(state, now);
+    if (verdict.allow && verdict.opensWindow) {
+        state.windowStart = now;
+    }
+    saveState(state);
+
+    if (asJson) console.log(JSON.stringify(verdict));
+    else console.error(`claude-window: ${verdict.allow ? "OK" : "ODGODI"} — ${verdict.reason}`);
+
+    return verdict.allow ? 0 : 10;
+}
+
+function renderStatus(i) {
+    const lines = [
+        `sada           ${i.now}`,
+        `štitim         ${i.protectAt} (prozor ${i.windowHours}h, margina ${i.marginMin} min)`,
+        `zapamćen prozor ${i.windowStart ? `${i.windowStart} → ${i.windowEnd}` : "(nema)"}`,
+    ];
+    for (const [type, v] of Object.entries(i.observed)) {
+        lines.push(`viđen ${type.padEnd(10)} reset ${v.resetsAt} (zabilježeno ${v.seenAt})`);
+    }
+    lines.push(`odluka         ${i.decision.allow ? "OK" : "ODGODI"} — ${i.decision.reason}`);
+    return lines.join("\n");
+}
+
+process.exit(main());

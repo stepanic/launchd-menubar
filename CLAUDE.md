@@ -68,7 +68,12 @@ stropa zna nacrtati menu viši od ekrana.
 
 ## Raspored launchd jobova
 Analiza i odluke o vremenima izvršavanja: **`SCHEDULING.md`**. Kratko: svi AI (Claude)
-jobovi kreću prije 02:30 da 5h prozor kvote istekne prije 08:30; fetch pipeline ima
-`CLAUDE_WINDOW_*` ogradu jer zna trajati 6h+ i preliti se u jutro.
+jobovi su pomaknuti u 00:10–01:00, a `tools/claude-window` je dijeljeni arbitar koji
+svaki takav job pita smije li sada trošiti kvotu — fiksni cutoff po jobu ne radi jer
+se iz sata ne vidi otvara li poziv nov 5h prozor ili ulazi u već otvoren.
+
+`tools/claude-window` je jedini izvršni dio ovog repa izvan app-a; symlinkan je u
+`~/.local/bin` i konzumiraju ga tri druga repa (fetch.domovina.tv, pipeline.domovina.ai,
+ms-toptal-projects/tools/*, italk/javna-nabava). Testovi: `./tools/claude-window.test.sh`.
 
 Preostale ideje (opcionalno) vidi u `HANDOFF.md`.
