@@ -2,10 +2,18 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// One collapsible group in the menu (Night / Daytime / Pollers / Services / …).
+struct JobSection: Identifiable {
+    let category: JobCategory
+    let jobs: [LaunchdJob]
+    var id: String { category.rawValue }
+}
+
 @MainActor
 final class JobStore: ObservableObject {
     @Published var jobs: [LaunchdJob] = []
     @Published var showOnlyMine: Bool = true
+    @Published var searchText: String = ""
     @Published var lastUpdated: Date?
     @Published var isLoading: Bool = false
 
@@ -24,9 +32,29 @@ final class JobStore: ObservableObject {
 
     var visibleJobs: [LaunchdJob] {
         let filtered = showOnlyMine ? jobs.filter(\.isMine) : jobs
-        return filtered.sorted { a, b in
+        let matched = searchText.isEmpty ? filtered : filtered.filter {
+            $0.label.localizedCaseInsensitiveContains(searchText)
+        }
+        return matched.sorted { a, b in
             if a.isMine != b.isMine { return a.isMine }
             return a.label.localizedCaseInsensitiveCompare(b.label) == .orderedAscending
+        }
+    }
+
+    /// `visibleJobs` bucketed by category, in display order, empty sections dropped.
+    ///
+    /// Within a section jobs sort by when they actually fire (00:10 before 01:00,
+    /// every 90s before every 30m) rather than alphabetically — with 23 jobs the
+    /// timeline is what you scan for, and it makes a gap in the night window obvious.
+    var sections: [JobSection] {
+        let grouped = Dictionary(grouping: visibleJobs, by: \.category)
+        return JobCategory.allCases.compactMap { category in
+            guard let jobs = grouped[category], !jobs.isEmpty else { return nil }
+            let sorted = jobs.sorted { a, b in
+                if a.spec.sortValue != b.spec.sortValue { return a.spec.sortValue < b.spec.sortValue }
+                return a.label.localizedCaseInsensitiveCompare(b.label) == .orderedAscending
+            }
+            return JobSection(category: category, jobs: sorted)
         }
     }
 

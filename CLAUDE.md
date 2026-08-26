@@ -44,13 +44,31 @@ pa kickstarta job).
 ## Status
 **GOTOVO (2026-06-22)** — app je funkcionalan i build-a clean (`./build.sh` → BUILD SUCCEEDED).
 Implementirano svih 5 Swift fajlova:
-- `Sources/Models.swift` — `LaunchdJob`, `describeSchedule(_:)`, `LaunchdLoader.loadAll()` (merge `launchctl list` + plistovi iz 3 dira).
-- `Sources/JobStore.swift` — `@MainActor ObservableObject`, auto-refresh 8 s, `runNow/reveal/openLog`.
+- `Sources/Models.swift` — `LaunchdJob`, `ScheduleSpec` / `JobCategory` (strukturirani raspored + kategorizacija), `describeSchedule(_:)`, `LaunchdLoader.loadAll()` (merge `launchctl list` + plistovi iz 3 dira).
+- `Sources/JobStore.swift` — `@MainActor ObservableObject`, auto-refresh 8 s, `sections` (grupiranje), `searchText`, `runNow/reveal/openLog`.
 - `Sources/LaunchdBarApp.swift` — `MenuBarExtra` (`timer` ikona, `.window` stil).
-- `Sources/MenuContentView.swift` — header (Only mine toggle, refresh, updated time), scrollable lista s `JobRow` (status dot + hover akcijski gumbi + context menu), footer (broj + Quit).
+- `Sources/MenuContentView.swift` — header (filter polje, Only mine toggle, refresh), lista grupirana u collapsible sekcije, footer (broj + failing + Quit).
 - `build.sh` — xcodegen + xcodebuild Release.
 
 Provjereno: lista prikazuje korisnikove jobove (domovina/italk/stepanic/…), schedule parsing radi
-(npr. `com.stepanic.dotclaude-backup` → `at 03:30`). "Only mine" default ON, mine jobovi prvi.
+(npr. `com.stepanic.dotclaude-backup` → `at 03:30`). "Only mine" default ON.
+
+## Grupiranje u UI-ju (2026-08-26)
+S 24 joba ravna lista je bila nepregledna. `JobCategory` grupira po **tome kad job radi**:
+Night (00:00–08:30) · Daytime · Pollers (interval/hourly) · Services (KeepAlive) · No schedule.
+Unutar sekcije se sortira po vremenu paljenja, ne abecedno — timeline je ono što se skenira.
+Pollers/Services/No schedule startaju collapsed (`@AppStorage("collapsedSections")`).
+
+Podjela na Night/Daytime nije kozmetika: `nightWindowEndMinutes` = 08:30 je granica iz
+`SCHEDULING.md`. Prazna "Daytime" sekcija = svi jobovi su u prozoru dok korisnik spava.
+
+Visina liste više nije fiksna (`maxHeight: 480`) nego raste s sadržajem do
+`visibleFrame.height - 160`. `MenuBarExtra(.window)` se sizea po sadržaju, pa bez tog
+stropa zna nacrtati menu viši od ekrana.
+
+## Raspored launchd jobova
+Analiza i odluke o vremenima izvršavanja: **`SCHEDULING.md`**. Kratko: svi AI (Claude)
+jobovi kreću prije 02:30 da 5h prozor kvote istekne prije 08:30; fetch pipeline ima
+`CLAUDE_WINDOW_*` ogradu jer zna trajati 6h+ i preliti se u jutro.
 
 Preostale ideje (opcionalno) vidi u `HANDOFF.md`.
