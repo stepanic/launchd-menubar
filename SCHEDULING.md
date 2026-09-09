@@ -64,6 +64,7 @@ nego arbitar iz §4. Poslije toga u noći rade samo ne-AI teški poslovi.
 | 00:45 | `com.italk.javna-nabava` | 09:25 | **da** | |
 | 00:50 | `com.italk.grant-watch` (pon/čet) | 09:40 | **da** | |
 | 01:00 | `tv.domovina.fetch.nightly` | 03:00 | **da** | 2h ranije = 2h više AI budžeta unutar prozora |
+| 01:30 | `com.italk.feed-commit` | — | ne | commita feed 4 watchera; nakon najkasnijeg (00:50 + jitter) — vidi §3.1 |
 | 02:00 | `com.revenuecat.podcast.enrich-youtube` | — | ne | ostaje |
 | 03:00 | `ai.domovina.nightly-build` | 01:00 | ne | maknuto s fetch pipelinea, Flutter build do 80 min |
 | 03:30 | `com.stepanic.dotclaude-backup` | — | ne | ostaje |
@@ -76,6 +77,19 @@ nego arbitar iz §4. Poslije toga u noći rade samo ne-AI teški poslovi.
 
 Rezultat: **nijedan scheduled job više ne pada izvan 00:00–08:30.** Vidljivo u
 LaunchdBaru — sekcija "Daytime" je prazna.
+
+### 3.1 `com.italk.feed-commit` (dodano 2026-09-09)
+
+Watcheri pišu dnevni markdown feed u radno stablo `ms-toptal-projects`, ali ga ne
+commitaju — do 2026-09-09 to se radilo ručno i u stablu je stajalo 46 nekomitanih
+fajlova. Zaseban job u 01:30 commita i pusha samo feed putove.
+
+Zašto zaseban job, a ne `git` na kraju svakog `run-cron.sh`: četiri watchera dijele
+jedan repo i s jitterom (0–20 min) im se prozori normalno preklapaju → utrka na
+`.git/index.lock`, i to tiha jer je u cronu. 01:30 je odabran tako da najkasniji
+watcher (00:50 + 20 min) sigurno završi.
+
+Detalji i zamke: `ms-toptal-projects/docs/2026-09-09-feed-auto-commit.md`.
 
 Vremena pollera nisu mijenjana (`fetch.priority` 90s, `fetch.magisterium` 10m,
 `pediludium.matchsync` 15m, `.health` 30m, `.snapshot` :05) ni KeepAlive servisi.
