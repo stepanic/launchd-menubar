@@ -35,6 +35,10 @@ Zato za trajni deploy uvijek koristi `./build.sh install` (prepiše `/Applicatio
 re-registrira u LaunchServices da izbjegne `OS_REASON_CODESIGNING` na prvom spawnu,
 pa kickstarta job).
 
+**Drugi Mac (bez Xcodea/Homebrewa, npr. Intel MacBook s Command Line Tools):** `build.sh`
+automatski pada na `swiftc` + ručno složen `.app` (`build/swiftc/LaunchdBar.app`), a
+`install` kreira LaunchAgent plist ako ne postoji (RunAtLoad, KeepAlive samo na crash).
+
 ## Konvencije
 - Swift language mode 5.0 (postavljeno u project.yml) — izbjegava strict concurrency gnjavažu.
 - App je `LSUIElement` (bez dock ikone), samo menu-bar.
